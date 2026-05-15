@@ -17,51 +17,38 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}   # 用有 workflows 权限的 PAT
 
       - name: 配置 Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # ========== 同步跟踪分支（保留 .github 工作流）==========
-      - name: 同步跟踪分支到上游（保留 .github）
+      # ========== 同步跟踪分支（完全与上游一致） ==========
+      - name: 同步跟踪分支到上游
         run: |
-          # 从仓库变量中读取上游信息（变量未配置时会报错退出）
           UPSTREAM_URL="${{ vars.UPSTREAM_URL }}"
           UPSTREAM_BRANCH="${{ vars.UPSTREAM_BRANCH }}"
           if [ -z "$UPSTREAM_URL" ] || [ -z "$UPSTREAM_BRANCH" ]; then
-            echo "❌ 请先在仓库设置中配置变量 UPSTREAM_URL 和 UPSTREAM_BRANCH"
-            echo "   路径：Settings → Secrets and variables → Actions → Variables"
+            echo "❌ 请先配置变量 UPSTREAM_URL 和 UPSTREAM_BRANCH"
             exit 1
           fi
 
           git remote add upstream "$UPSTREAM_URL" || true
           git fetch upstream
+
+          # 强制重置到上游（此时本地 master 与上游一致）
           git checkout -B "$UPSTREAM_BRANCH" "upstream/$UPSTREAM_BRANCH"
-
-          # 备份并还原 .github 目录，防止工作流文件被上游覆盖
-          cp -r .github /tmp/github_backup 2>/dev/null || true
-          if [ -d "/tmp/github_backup" ]; then
-            # 先清空上游带来的 .github，再用备份覆盖
-            rm -rf .github
-            cp -r /tmp/github_backup .github
-            rm -rf /tmp/github_backup
-          fi
-
-          git add .github
-          if ! git diff --cached --quiet; then
-            git commit -m "swlplay $(date '+%Y-%m-%d %H:%M:%S') sundaqiang submodule Update [skip ci]"
-          fi
-
           git push origin "$UPSTREAM_BRANCH" --force-with-lease
-          echo "✅ 跟踪分支已同步，.github 目录已保留"
+          echo "✅ 跟踪分支已与上游完全同步"
 
-      # ========== 变基 packages 到最新跟踪分支 ==========
+      # ========== 变基 packages 到跟踪分支（保护自己的 .github） ==========
       - name: 变基 packages 到跟踪分支
         id: rebase_packages
         run: |
           UPSTREAM_BRANCH="${{ vars.UPSTREAM_BRANCH }}"
+
+          # 检出 packages 分支
           git fetch origin packages
           git checkout -B packages origin/packages 2>/dev/null || {
             echo "未检测到远程 packages 分支，跳过"
@@ -69,19 +56,46 @@ jobs:
             exit 0
           }
 
+          # 🔑 在变基之前备份 packages 分支自己的 .github 目录
+          if [ -d .github ]; then
+            cp -r .github /tmp/github_backup
+            echo "已备份 .github 目录"
+          fi
+
           BEFORE_REBASE=$(git rev-parse HEAD)
 
+          # 变基到上游跟踪分支
           if git rebase "$UPSTREAM_BRANCH"; then
             AFTER_REBASE=$(git rev-parse HEAD)
+
+            # 删除上游带来的 .github 目录（如果有）
+            if [ -d .github ]; then
+              rm -rf .github
+            fi
+
+            # 恢复自己备份的 .github 目录
+            if [ -d /tmp/github_backup ]; then
+              cp -r /tmp/github_backup .github
+              rm -rf /tmp/github_backup
+
+              git add .github
+              if ! git diff --cached --quiet; then
+                git commit -m "保留自己的 .github 工作流文件 [skip ci]"
+              fi
+            fi
+
+            # 如果变基后有实质更新，则推送
             if [ "$BEFORE_REBASE" != "$AFTER_REBASE" ]; then
               git push origin packages --force-with-lease
               echo "✅ packages 变基成功，已推送新提交"
               echo "STATUS=success" >> $GITHUB_OUTPUT
             else
-              echo "ℹ️ packages 已经基于最新跟踪分支，无新提交"
+              echo "ℹ️ packages 已是最新，无新提交"
               echo "STATUS=up-to-date" >> $GITHUB_OUTPUT
             fi
           else
+            # 变基冲突，清理备份并中止
+            rm -rf /tmp/github_backup 2>/dev/null || true
             git rebase --abort
             echo "⚠️ 变基冲突"
             echo "STATUS=conflict" >> $GITHUB_OUTPUT
