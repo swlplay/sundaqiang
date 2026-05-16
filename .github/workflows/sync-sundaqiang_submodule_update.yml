@@ -2,7 +2,7 @@ name: sync-sundaqiang_submodule_update
 
 on:
   schedule:
-    - cron: '0 3 * * *'          # 每天北京时间 18:00 执行
+    - cron: '0 10 * * *'          # 每天北京时间 18:00 执行
   workflow_dispatch:               # 允许手动触发
 
 permissions:
